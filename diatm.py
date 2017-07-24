@@ -66,7 +66,7 @@ class DiaTM:
 
         self.topic_counts = np.zeros(shape=(self.n_topics, ))
         self.dialect_counts = np.zeros(shape=(self.n_dialects, ))
-        self.collection_dialect_counts = np.zeros(shape=(len(collections),
+        self.collection_dialect_counts = np.zeros(shape=(len(X),
                                                     self.n_dialects))
 
         self.topic_word_counts = [Counter() for i in range(0, self.n_topics)]
