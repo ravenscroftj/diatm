@@ -2,6 +2,18 @@ import random
 import glob
 import numpy as np
 from collections import defaultdict, Counter
+from scipy.sparse import lil_matrix
+
+
+def sample_from(weights):
+    """returns i with probability weights[i] / sum(weights)"""
+    total = sum(weights)
+    rnd = total * random.random() # uniform between 0 and total
+    for i, w in enumerate(weights):
+        rnd -= w
+        #print i, w, rnd
+        if rnd <= 0:  # return the smallest i such that
+            return i  # weigths[0] + ... + weigths[i] >= rnd
 
 
 class DiaTM:
@@ -31,6 +43,9 @@ class DiaTM:
         """Prepare the model for training"""
 
         self.topic_counts = np.zeros(shape=(self.n_topics))
+
+        self.dialect_counts = np.zeros(shape=self.n_dialects)
+
         self.collection_dialect_counts = np.zeros(shape=(self.n_collections,
                                                          self.n_dialects))
 
@@ -43,17 +58,141 @@ class DiaTM:
         self.document_topic_counts = np.zeros(shape=(self.num_docs,
                                                      self.n_topics))
 
-        for collection in X:
-            print(np.max(collection, axis=0))
 
-        # randomly initialise state
-        #random.seed()
+        longest_doc = max([collection.shape[1] for collection in X])
 
-        # randomly assign each word a topic
-        #self.document_topics = np.zeros(shape=())
+        self.document_topics = lil_matrix((self.num_docs, longest_doc),
+                                     dtype=np.int8)
+
+        self.document_dialects = lil_matrix((self.num_docs, longest_doc),
+                                     dtype=np.int8)
+
+        self.topic_dialect_words = np.zeros(shape=(self.topic_counts,
+                                                   self.dialect_counts,
+                                                   self.vocab_size))
+
+        doc_offset = 0
+
+        self.document_lengths = np.zeros(shape(self.num_docs,))
+
+        for c, collection in enumerate(X):
+
+            # find total word count
+            N = collection.sum()
+            #generate a random topic and dialect for every word
+            t_rands = np.random.choice(self.n_topics, N)
+            d_rands = np.random.choice(self.n_dialects, N)
+
+            for doc, word in np.transpose(collection.nonzero()):
+
+                for i, topic, dialect in zip(range(1, collection[doc, word]+1),
+                                             t_rands,
+                                             d_rands):
+
+                    self.document_topics[doc + doc_offset, word] = topic
+                    self.document_dialects[doc+doc_offset, word] = dialect
+                    self.document_topic_counts[doc+doc_offset, topic] += 1
+
+                    self.collection_dialect_counts[c, dialect] += 1
+
+                    self.topic_word_counts[topic][word] += 1
+                    self.dialect_word_counts[dialect][word] += 1
+
+                    self.topic_counts[topic] += 1
+                    self.dialect_counts[dialect] += 1
+
+                    self.topic_dialect_words[topic][dialect][word] += 1
 
 
+            # once we get to here, increase the doc_offset by collection length
+            doc_offset += collection.shape[0]
 
+
+    def _fit(self, X):
+
+        doc_offset = 0
+
+        for c, collection in enumerate(X):
+
+            for doc, word in np.transpose(collection.nonzero()):
+
+                for i in range(1, collection[doc, word]+1):
+
+                    topic = self.document_topics[doc+doc_offset, word]
+                    dialect = self.document_dialects[doc+doc_offset, word]
+
+                    self.document_topic_counts[doc+doc_offset, topic] -= 1
+                    self.topic_word_counts[topic, word] -= 1
+                    self.topic_counts[topic] -= 1
+                    self.document_lengths[doc+doc_offset] -= 1
+
+                    self.topic_dialect_words[topic, dialect, word] -= 1
+                    self.dialect_word_counts[dialect, word] -= 1
+                    self.collection_dialect_counts[c, dialect] -= 1
+
+                    # randomly choose new topic and dialect
+                    new_topic = choose_new_topic(doc, word)
+
+                    # add new topic back to the counts
+                    self.document_topic_counts[doc, new_topic] += 1
+
+                    self.topic_word_counts[new_topic, word] += 1
+                    self.topic_counts[new_topic] += 1
+                    self.document_lengths[doc] += 1
+
+                    # choose new dialect based on dialect collection weights
+                    new_dialect = choose_new_dialect(d,word)
+                    self.document_dialects[doc, i] = new_dialect
+
+                    # add new dialect back to the counts
+                    collection_dialect_counts[doc_collections[d]][new_dialect] += 1
+                    dialect_word_counts[new_dialect][word] += 1
+
+
+                    topic_dialect_words[new_topic][new_dialect][word] += 1
+
+            # once we get to here, increase the doc_offset by collection length
+            doc_offset += collection.shape[0]
+
+
+    def choose_new_topic(self, doc, word):
+        """Given a word's topic weightings, choose a new topic"""
+
+        return sample_from([self.topic_weight(doc, word, k)
+                            for k in range(self.n_topics)])
+
+
+    def p_dialect_given_collection(dialect, collection):
+        """The probability of a dialect given a collection id"""
+        return (collection_dialect_counts[collection][dialect]) / (sum(collection_dialect_counts[collection]))
+
+    def p_word_given_dialect(word, dialect, alpha=0.1):
+        """The probability of a word occuring within a dialect"""
+        #print("dialect_word_counts", dialect_word_counts[dialect][word] )
+        return ( (dialect_word_counts[dialect][word] + alpha) /
+                (sum(dialect_word_counts[dialect].values()) + W*alpha) )
+
+    def p_word_given_topic(word, topic):
+        """the fraction of words assigned to topic"""
+
+        return ((self.topic_word_counts[topic, word] + self.beta) /
+                (self.topic_counts[topic] + self.vocab_size * self.beta))
+
+
+    def p_topic_given_document(topic, d, alpha=0.1):
+        """the fraction of words in d that are assigned to topic (plus some smoothing)"""
+
+        return ((document_topic_counts[d][topic]+alpha) /
+                (document_lengths[d]+ n_topics*alpha))
+
+    def dialect_weight(d, word, dia):
+        """given doc d and word, return the weight for the k-th dialect"""
+        return p_word_given_dialect(word, dia) * p_dialect_given_collection(dia, doc_collections[d])
+
+    def topic_weight(d, word, k):
+        """given doc d and word, return the weight for the k-th topic"""
+        return (self.p_word_given_topic(word, k) *
+                self.p_topic_given_document(k, d))
 
 if __name__ == "__main__":
 
