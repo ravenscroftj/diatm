@@ -5,6 +5,7 @@ import numpy as np
 from collections import defaultdict, Counter
 from scipy.sparse import csr_matrix
 from itertools import chain
+from lda import util
 
 
 def concatenate_csr_matrices_by_row(matrix1, matrix2):
@@ -83,9 +84,20 @@ class DiaTM:
 
         self.document_lengths = self.docs.sum(axis=1)
 
+        self.WS, self.DS = utils.matrix_to_lists(dtm.docs)
+
+        self.ZS = np.empty_like(self.WS)
+        self.CS = np.empty_like(self.WS)
 
         # initialise counters
-        for d in range(self.docs.shape[0]):
+        N = self.docs.sum()
+        for n in range(N):
+
+            w = self.WS[n]
+            d = self.DS[n]
+            c = self.collection_offsets[d]
+
+
 
             doc_words = chain(*[[word] * self.docs[d,word]
                                           for (_,word) in np.transpose(self.docs[d].nonzero()) ])
