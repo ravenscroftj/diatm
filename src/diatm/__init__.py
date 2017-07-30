@@ -1,11 +1,14 @@
 import random
 import glob
+import timeit
 import pandas as pd
 import numpy as np
 from collections import defaultdict, Counter
 from scipy.sparse import csr_matrix
 from itertools import chain
-from lda import util
+from lda import utils
+
+
 
 
 def concatenate_csr_matrices_by_row(matrix1, matrix2):
@@ -79,90 +82,79 @@ class DiaTM:
 
         self.topic_dialect_words = np.zeros(shape=(self.n_topics, self.n_dialects, self.vocab_size))
 
-        self.document_topics = np.random.choice(self.n_topics, (self.n_documents, longest_doc))
-        self.document_dialects = np.random.choice(self.n_dialects, (self.n_documents, longest_doc))
-
         self.document_lengths = self.docs.sum(axis=1)
 
-        self.WS, self.DS = utils.matrix_to_lists(dtm.docs)
+        self.WS, self.DS = utils.matrix_to_lists(self.docs)
 
-        self.ZS = np.empty_like(self.WS)
-        self.CS = np.empty_like(self.WS)
+        # topic selection for word
+        self.ZS = np.random.choice(self.n_topics, self.WS.shape)
+        # dialect selection for word
+        self.NS = np.random.choice(self.n_dialects, self.WS.shape)
 
         # initialise counters
         N = self.docs.sum()
         for n in range(N):
 
-            w = self.WS[n]
-            d = self.DS[n]
-            c = self.collection_offsets[d]
+            word = self.WS[n]
+            doc = self.DS[n]
+            topic = self.ZS[n]
+            dia = self.NS[n]
+            col = self.collection_offsets[doc]
 
-
-
-            doc_words = chain(*[[word] * self.docs[d,word]
-                                          for (_,word) in np.transpose(self.docs[d].nonzero()) ])
-
-            for word, topic, dialect in zip(doc_words, self.document_topics[d],
-                                            self.document_dialects[d]):
-
-                self.collection_dialect_counts[self.collection_offsets[d]][dialect] += 1
-                self.document_topic_counts[d][topic] += 1
-                self.topic_word_counts[topic][word] += 1
-                self.dialect_word_counts[dialect][word] += 1
-                self.topic_counts[topic]+=1
-                self.topic_dialect_words[topic][dialect][word] += 1
+            self.collection_dialect_counts[col][dia] += 1
+            self.document_topic_counts[doc][topic] += 1
+            self.topic_word_counts[topic][word] += 1
+            self.dialect_word_counts[dia][word] += 1
+            self.topic_counts[topic]+=1
+            self.topic_dialect_words[topic][dia][word] += 1
 
     def fit(self, X):
         self._initialize(X)
 
-
+        N = self.docs.sum()
         for it in range(self.n_iter):
 
-            print("Iter:", it)
-
-            for d in range(self.n_documents):
+            #print("Iter:", it)
 
 
-                doc_words = chain(*[[word] * self.docs[d,word]
-                                          for (_,word) in np.transpose(self.docs[d].nonzero()) ])
+            for n in range(N):
+                word = self.WS[n]
+                doc = self.DS[n]
+                topic = self.ZS[n]
+                dia = self.NS[n]
+                col = self.collection_offsets[doc]
 
-                for i, (word, topic, dialect) in enumerate(
-                    zip(doc_words,
-                        self.document_topics[d],
-                        self.document_dialects[d])):
+                # remove current word/topic from the counts
+                self.document_topic_counts[doc][topic] -= 1
+                self.topic_word_counts[topic][word] -= 1
+                self.topic_counts[topic] -= 1
+                self.document_lengths[doc] -= 1
 
+                self.topic_dialect_words[topic][dia][word] -= 1
+                self.dialect_word_counts[dia][word] -= 1
+                self.collection_dialect_counts[col][dia] -= 1
 
-                    # remove current word/topic from the counts
-                    self.document_topic_counts[d][topic] -= 1
-                    self.topic_word_counts[topic][word] -= 1
-                    self.topic_counts[topic] -= 1
-                    self.document_lengths[d] -= 1
+                # choose new topic based on the topic weights
+                new_topic = self.choose_new_topic(doc, word)
+                self.ZS[n] = new_topic
 
-                    self.topic_dialect_words[topic][dialect][word] -= 1
-                    self.dialect_word_counts[dialect][word] -= 1
-                    self.collection_dialect_counts[self.collection_offsets[d]][dialect] -= 1
+                # add new topic back to the counts
+                self.document_topic_counts[doc][new_topic] += 1
 
-                    # choose new topic based on the topic weights
-                    new_topic = self.choose_new_topic(d, word)
-                    self.document_topics[d][i] = new_topic
+                self.topic_word_counts[new_topic][word] += 1
+                self.topic_counts[new_topic] += 1
+                self.document_lengths[doc] += 1
 
-                    # add new topic back to the counts
-                    self.document_topic_counts[d][new_topic] += 1
+                # choose new dialect based on dialect collection weights
+                new_dialect = self.choose_new_dialect(doc,word)
+                self.NS[n] = new_dialect
 
-                    self.topic_word_counts[new_topic][word] += 1
-                    self.topic_counts[new_topic] += 1
-                    self.document_lengths[d] += 1
+                # add new dialect back to the counts
+                self.collection_dialect_counts[col][new_dialect] += 1
+                self.dialect_word_counts[new_dialect][word] += 1
 
-                    # choose new dialect based on dialect collection weights
-                    new_dialect = self.choose_new_dialect(d,word)
-                    self.document_dialects[d][i] = new_dialect
+                self.topic_dialect_words[new_topic][new_dialect][word] += 1
 
-                    # add new dialect back to the counts
-                    self.collection_dialect_counts[self.collection_offsets[d]][new_dialect] += 1
-                    self.dialect_word_counts[new_dialect][word] += 1
-
-
-                    self.topic_dialect_words[new_topic][new_dialect][word] += 1
 
 
     def choose_new_topic(self, doc, word):
@@ -219,6 +211,9 @@ class DiaTM:
 if __name__ == "__main__":
 
     from sklearn.feature_extraction.text import CountVectorizer
+    import pyximport; pyximport.install()
+
+    import _diatm
 
     doc1 = "tummy ache bad food vomit ache"
     doc4 = "vomit stomach muscle ache food poisoning"
@@ -246,11 +241,17 @@ if __name__ == "__main__":
     cm1 = cv.transform(collection1)
     cm2 = cv.transform(collection2)
 
-    dtm = DiaTM(n_topics=3, n_dialects=2, feature_names=cv.get_feature_names())
+    dtm = _diatm.DiaTM(n_topics=3, n_dialects=2, feature_names=cv.get_feature_names())
+    #dtm = DiaTM(n_topics=3, n_dialects=2, feature_names=cv.get_feature_names())
+
+
+    start = timeit.default_timer()
 
     dtm.fit([cm1,cm2])
 
+    end = timeit.default_timer() - start
 
+    print("Took {:f} seconds".format(end))
 
     topics_dict = defaultdict(lambda:[])
 
