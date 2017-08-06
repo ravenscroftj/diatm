@@ -1,4 +1,8 @@
-from collections import Counter
+#cython: language_level=3
+#cython: boundscheck=False
+#cython: wraparound=False
+#cython: initializedcheck=False
+#cython: cdivision=True
 
 import itertools
 import numpy as np
@@ -13,6 +17,7 @@ from scipy.sparse import csr_matrix
 from itertools import chain
 from lda import utils
 
+from cython.view cimport array as cvarray
 from cython.operator cimport preincrement as inc, predecrement as dec
 from libc.stdlib cimport malloc, free
 
@@ -21,6 +26,14 @@ DTYPE = np.int
 # every type in the numpy module there's a corresponding compile-time
 # type with a _t-suffix.
 ctypedef np.int_t DTYPE_t
+
+cdef int cython_sum(long[:] y) nogil:    #changed `int` to `long`
+    cdef int N = y.shape[0]
+    cdef int x = y[0]
+    cdef int i
+    for i in xrange(1,N):
+        x += y[i]
+    return x
 
 
 def concatenate_csr_matrices_by_row(matrix1, matrix2):
@@ -31,16 +44,6 @@ def concatenate_csr_matrices_by_row(matrix1, matrix2):
     new_ind_ptr = np.concatenate((matrix1.indptr, new_ind_ptr))
 
     return csr_matrix((new_data, new_indices, new_ind_ptr))
-
-def sample_from(weights):
-    """returns i with probability weights[i] / sum(weights)"""
-    total = sum(weights)
-    rnd = total * random.random()  # uniform between 0 and total
-    for i, w in enumerate(weights):
-        rnd -= w
-        #print i, w, rnd
-        if rnd <= 0:  # return the smallest i such that
-            return i  # weigths[0] + ... + weigths[i] >= rnd
 
 
 cdef int searchsorted(double* arr, int length, double value) nogil:
@@ -68,6 +71,7 @@ cdef class DiaTM:
     DS, \
     ZS, \
     NS, \
+    _rands, \
     collection_offsets, \
     document_topic_counts, \
     topic_word_counts, \
@@ -85,17 +89,22 @@ cdef class DiaTM:
     n_iter, \
     vocab_size
 
-    cpdef double alpha, beta
+    cpdef double alpha, beta, eta
 
     cpdef public object feature_names, docs
 
-    def __init__(self, n_topics, n_dialects, n_iter=50, alpha=0.1, beta=0.1, feature_names=None):
+    def __init__(self, n_topics, n_dialects, n_iter=50, alpha=0.1, beta=0.1, eta=0.1, feature_names=None, random_state=None):
         self.n_topics = n_topics
         self.n_dialects = n_dialects
         self.n_iter = n_iter
         self.alpha = alpha
         self.beta = beta
+        self.eta = eta
         self.feature_names = feature_names
+
+        # random numbers that are reused
+        rng = utils.check_random_state(random_state)
+        self._rands = rng.rand(1024**2 // 8)  # 1MiB of random variates
 
 
     cdef void _initialize(self, X) except *:
@@ -151,8 +160,10 @@ cdef class DiaTM:
         # dialect selection for word
         self.NS = np.random.choice(self.n_dialects, (self.WS.shape[0],))
 
+
         # initialise counters
         N = self.docs.sum()
+        cdef int n
 
         for n in range(N):
 
@@ -176,19 +187,15 @@ cdef class DiaTM:
 
         for it in range(self.n_iter):
 
-            #print("Iter:", it)
+            print("Iter:", it)
 
             self._sample()
 
     cdef void _sample(self) except *:
 
-        cdef int word, vocab_size, doc, topic, dia, col, new_topic, n_topics, n_dialects
-
-        cdef double alpha, beta
+        cdef int word, vocab_size, topic, dia, col, new_topic, new_dialect, n_topics, n_dialects
 
         # store local references to number of topics and dialects for nogil
-        beta = self.beta
-        alpha = self.alpha
         n_topics = self.n_topics
         n_dialects = self.n_dialects
         vocab_size = self.vocab_size
@@ -200,12 +207,16 @@ cdef class DiaTM:
         cdef long[:] ZS = self.ZS
         cdef long[:] NS = self.NS
         cdef long[:] coffset = self.collection_offsets
-        cdef long[:,:]  doc_top_counts= self.document_topic_counts
-        cdef long[:,:]  top_word_counts = self.topic_word_counts
+        cdef long[:,:] doc_top_counts = self.document_topic_counts
+        cdef long[:,:] top_word_counts = self.topic_word_counts
         cdef long[:]  topic_counts = self.topic_counts
         cdef long[:,:,:] topic_dialect_words = self.topic_dialect_words
         cdef long[:,:] dialect_word_counts = self.dialect_word_counts
         cdef long[:,:] collection_dialect_counts = self.collection_dialect_counts
+
+        # access to the random numbers
+        cdef double[:] rands = self._rands
+        cdef int n_rand = self._rands.shape[0]
 
         # set up cumulative distribution stuff for random choices
         cdef double dist_cum = 0
@@ -217,177 +228,95 @@ cdef class DiaTM:
             raise MemoryError("Could not allocate memory during sampling.")
 
         # N is the number of words  in all the documents
-        cdef int N = self.docs.sum()
+        cdef int N = WS.shape[0]
+
+        cdef double r, p_word_given_topic, p_word_given_dialect, p_topic_given_document, p_dialect_given_collection
+        cdef int n
+        cdef int doc
 
         # ok this is the fun bit
+        with nogil:
+          for n in range(N):
+              word = WS[n]
+              doc = DS[n]
+              topic = ZS[n]
+              dia = NS[n]
+              col = coffset[doc]
 
-        for n in range(N):
-            word = WS[n]
-            doc = DS[n]
-            topic = ZS[n]
-            dia = NS[n]
-            col = coffset[doc]
+              # remove current word/topic from the counts
+              dec(doc_top_counts[doc,topic])
 
-            # remove current word/topic from the counts
-            dec(doc_top_counts[doc][topic])
+              dec(top_word_counts[topic,word])
+              dec(topic_counts[topic])
+              dec(doc_lens[doc])
 
-            dec(top_word_counts[topic][word])
-            dec(topic_counts[topic])
-            dec(doc_lens[doc])
+              dec(topic_dialect_words[topic,dia,word])
+              dec(dialect_word_counts[dia,word])
+              dec(collection_dialect_counts[col,dia])
 
-            dec(topic_dialect_words[topic][dia][word])
-            dec(dialect_word_counts[dia][word])
-            dec(collection_dialect_counts[col][dia])
+              # choose new topic based on the topic weights
+  #            new_topic = self.choose_new_topic(doc, word)
 
-            # choose new topic based on the topic weights
-            new_topic = self.choose_new_topic(doc, word)
+              dist_cum = 0
 
-            dist_cum = 0
+              for k in range(n_topics):
 
-            for k in range(n_topics):
+                p_word_given_topic = (<double>(top_word_counts[k,word] + self.beta) /
+                        <double>(topic_counts[k] + vocab_size * self.beta))
 
-              p_word_given_topic = ((top_word_counts[topic][word] + beta) /
-                      (topic_counts[topic] + vocab_size * beta))
+                p_topic_given_document = (<double>(doc_top_counts[doc,k] + self.alpha) /
+                        <double>(doc_lens[doc]+ n_topics*self.alpha))
 
-              p_topic_given_document = ((doc_top_counts[doc][topic] + alpha) /
-                      (doc_lens[doc]+ n_topics*alpha))
+                dist_cum += p_word_given_topic * p_topic_given_document
+                dist_sum_n[k] = dist_cum
 
-              dist_cum += p_word_given_topic * p_topic_given_document
-              dist_sum_n[k] = dist_cum
+              r = rands[n % n_rand] * dist_cum
+              new_topic = searchsorted(dist_sum_n, n_topics, r)
 
-            #r = rands[i % n_rand] * dist_cum
+              ZS[n] = new_topic
 
-            #new_topic = searchsorted(dist_sum, n_topics, r)
+              # add new topic back to the counts
+              inc(doc_top_counts[doc,new_topic])
+
+              inc(top_word_counts[new_topic,word])
+              inc(topic_counts[new_topic])
+              inc(doc_lens[doc])
+
+              # choose new dialect based on dialect collection weights
+  #            new_dialect = self.choose_new_dialect(doc,word)
+
+              dist_cum = 0
+              for d in range(n_dialects):
+
+                p_word_given_dialect = ((<double>dialect_word_counts[d,word] + self.alpha) /
+                        <double>(cython_sum(dialect_word_counts[d,:])+vocab_size*self.alpha))
+
+                #print(collection_dialect_counts[col][d])
+                #print(cython_sum(collection_dialect_counts[col]))
 
 
-            ZS[n] = new_topic
 
-            # add new topic back to the counts
-            inc(doc_top_counts[doc][new_topic])
+                p_dialect_given_collection = (<double>collection_dialect_counts[col,d] + self.eta
+                        ) / <double>(cython_sum(collection_dialect_counts[col]) + self.n_collections*self.eta)
 
-            inc(top_word_counts[new_topic][word])
-            inc(topic_counts[new_topic])
-            inc(doc_lens[doc])
+                #print("p_word_given_dialect is:{}".format(p_word_given_dialect))
+                #print("p_dialect_given_collection is {}".format(p_dialect_given_collection))
 
-            # choose new dialect based on dialect collection weights
-            new_dialect = self.choose_new_dialect(doc,word)
+                dist_cum += p_word_given_dialect * p_dialect_given_collection
+                dist_sum_d[d] = dist_cum
 
-            self.NS[n] = new_dialect
+                #print("Dialect prob for {} is {}".format(d, dist_cum))
 
-            # add new dialect back to the counts
-            inc(collection_dialect_counts[col][new_dialect])
-            inc(dialect_word_counts[new_dialect][word])
+              r = rands[n % n_rand] * dist_cum
+              new_dialect = searchsorted(dist_sum_d, n_dialects, r)
+              NS[n] = new_dialect
 
-            inc(topic_dialect_words[new_topic][new_dialect][word])
+              # add new dialect back to the counts
+              inc(collection_dialect_counts[col,new_dialect])
+              inc(dialect_word_counts[new_dialect,word])
+
+              inc(topic_dialect_words[new_topic,new_dialect,word])
 
         # of course we are in c land which means freeing our arrays
         free(dist_sum_n)
         free(dist_sum_d)
-
-    def choose_new_topic(self, doc, word):
-        """Given a word's topic weightings, choose a new topic"""
-
-        return sample_from([self.topic_weight(doc, word, k)
-                            for k in range(self.n_topics)])
-
-
-    def p_dialect_given_collection(self, dialect, collection):
-        """The probability of a dialect given a collection id"""
-        return (self.collection_dialect_counts[collection][dialect]
-                ) / (sum(self.collection_dialect_counts[collection]))
-
-    def p_word_given_dialect(self, word, dialect, alpha=0.1):
-        """The probability of a word occuring within a dialect"""
-
-        return ((self.dialect_word_counts[dialect][word] + self.alpha) /
-                (self.dialect_word_counts[dialect].sum() +
-                 self.vocab_size*self.alpha))
-
-    def p_word_given_topic(self, word, topic):
-        """the fraction of words assigned to topic"""
-
-        return ((self.topic_word_counts[topic][word] + self.beta) /
-                (self.topic_counts[topic] + self.vocab_size * self.beta))
-
-
-    def p_topic_given_document(self, topic, d, alpha=0.1):
-        """the fraction of words in d that are assigned to topic (plus some smoothing)"""
-
-        return ((self.document_topic_counts[d][topic]+self.alpha) /
-                (self.document_lengths[d]+ self.n_topics*self.alpha))
-
-    def dialect_weight(self, d, word, dia):
-        """given doc d and word, return the weight for the k-th dialect"""
-        return (self.p_word_given_dialect(word, dia) *
-                self.p_dialect_given_collection(dia, self.collection_offsets[d]))
-
-    def topic_weight(self, d, word, k):
-        """given doc d and word, return the weight for the k-th topic"""
-        return (self.p_word_given_topic(word, k) *
-                self.p_topic_given_document(k, d))
-
-
-    def choose_new_dialect(self, d, word):
-        """Given a word's dialect weightings, choose a new dialect."""
-
-
-        return sample_from([self.dialect_weight(d,word,dia)
-                            for dia in range(self.n_dialects)])
-
-
-
-if __name__ == "__main__":
-
-    from sklearn.feature_extraction.text import CountVectorizer
-
-    doc1 = "tummy ache bad food vomit ache"
-    doc4 = "vomit stomach muscle ache food poisoning"
-    doc2 = "pulled muscle gym workout exercise cardio"
-    doc5 = "muscle aerobic exercise cardiovascular calories"
-    doc3 = "diet exercise carbs protein food health"
-    doc6 = "carbohydrates diet food ketogenic protein calories"
-    doc7 = "gym food gainz tummy protein cardio muscle"
-    doc8 = "stomach crunches muscle ache protein"
-    doc9 = "gastroenteritis stomach vomit nausea dehydrated"
-    doc10 = "dehydrated water exercise cardiovascular"
-    doc11 = 'drink water daily diet health'
-
-    # 'simple' documents
-    collection1 = [doc1,doc2,doc3, doc7, doc11]
-
-    # 'scientific' documents
-    collection2 = [doc4,doc5,doc6, doc8, doc9, doc10]
-
-    cv = CountVectorizer()
-
-    cv.fit(collection1 + collection2)
-
-
-    cm1 = cv.transform(collection1)
-    cm2 = cv.transform(collection2)
-
-    dtm = DiaTM(n_topics=3, n_dialects=2, feature_names=cv.get_feature_names())
-
-    dtm.fit([cm1,cm2])
-
-
-
-    topics_dict = defaultdict(lambda:[])
-
-    for topic in range(dtm.n_topics):
-        for dia in range(dtm.n_dialects):
-
-            word_idx = sorted(dtm.topic_dialect_words[topic][dia].nonzero()[0],
-                           key=lambda x: dtm.topic_dialect_words[topic][dia][x],
-                           reverse=True)[:5]
-
-            words = [dtm.feature_names[x] for x in word_idx]
-
-            while len(words) < 5:
-                words.append("")
-
-            topics_dict["Topic"+str(topic) +" Dialect " + str(dia)] += words
-
-    topics_df = pd.DataFrame.from_dict(topics_dict)
-
-    print(topics_df)

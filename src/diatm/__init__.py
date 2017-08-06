@@ -215,23 +215,32 @@ if __name__ == "__main__":
 
     import _diatm
 
-    doc1 = "tummy ache bad food vomit ache"
-    doc4 = "vomit stomach muscle ache food poisoning"
-    doc2 = "pulled muscle gym workout exercise cardio"
-    doc5 = "muscle aerobic exercise cardiovascular calories"
-    doc3 = "diet exercise carbs protein food health"
-    doc6 = "carbohydrates diet food ketogenic protein calories"
-    doc7 = "gym food gainz tummy protein cardio muscle"
-    doc8 = "stomach crunches muscle ache protein"
-    doc9 = "gastroenteritis stomach vomit nausea dehydrated"
-    doc10 = "dehydrated water exercise cardiovascular"
-    doc11 = 'drink water daily diet health'
+    doc0 = "stomach muscle ache food poisoning vomit nausea"
+    doc1 = "muscle aerobic exercise cardiovascular calories"
+    doc2 = "carbohydrates diet food ketogenic protein calories"
+    doc3 = "stomach crunches muscle ache protein"
+    doc4 = "gastroenteritis stomach vomit nausea dehydrated"
+    doc5 = "dehydrated water exercise cardiovascular"
 
-    # 'simple' documents
-    collection1 = [doc1,doc2,doc3, doc7, doc11]
 
     # 'scientific' documents
-    collection2 = [doc4,doc5,doc6, doc8, doc9, doc10]
+    collection1 = [
+        "stomach muscle ache food poisoning vomit nausea",
+        "muscle aerobic exercise cardiovascular calories",
+        "carbohydrates diet food ketogenic protein calories",
+        "stomach crunches muscle ache protein",
+        "gastroenteritis stomach vomit nausea dehydrated",
+        "dehydrated water exercise cardiovascular"
+        ]
+
+    # 'simple' documents
+    collection2 = [
+        "tummy ache bad food poisoning sick",
+        "pulled muscle gym workout exercise cardio",
+        "diet exercise carbs protein food health",
+        "gym food gainz protein cardio muscle",
+        "drink water daily diet health",
+    ]
 
     cv = CountVectorizer()
 
@@ -241,7 +250,7 @@ if __name__ == "__main__":
     cm1 = cv.transform(collection1)
     cm2 = cv.transform(collection2)
 
-    dtm = _diatm.DiaTM(n_topics=3, n_dialects=2, feature_names=cv.get_feature_names())
+    dtm = _diatm.DiaTM(n_topics=3, n_dialects=2, n_iter=20, feature_names=cv.get_feature_names())
     #dtm = DiaTM(n_topics=3, n_dialects=2, feature_names=cv.get_feature_names())
 
 
