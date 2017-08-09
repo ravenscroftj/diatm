@@ -1,6 +1,9 @@
+import numpy as np
+import os
+
 # examplemod.pyxbdl
 def make_ext(modname, pyxfilename):
     from distutils.extension import Extension
     return Extension(name = modname,
                      sources=[pyxfilename, 'gamma.c'],
-                     include_dirs=['./'] )
+                     include_dirs=[os.path.dirname(__file__), np.get_include()] )
