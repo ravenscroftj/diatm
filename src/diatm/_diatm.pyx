@@ -371,10 +371,10 @@ cdef class DiaTM:
 
               dist_cum = 0
 
-              dia_given_doc_denom = <double>(cython_sum(doc_dia_counts[doc]) + self.n_documents*self.eta)
+              dia_given_doc_denom = <double>(cython_sum(doc_dia_counts[doc]) + self.n_documents*self.alpha)
 
               #pre-calculate some of the values outside of the double loop
-              dia_col_collection_denom = <double>(cython_sum(collection_dialect_counts[col]) + self.n_dialects*self.eta)
+              dia_col_collection_denom = <double>(cython_sum(collection_dialect_counts[col]) + self.n_dialects*self.alpha)
 
               topic_given_doc_denom =  <double>( doc_lens[doc] +  self.alpha*self.n_topics)
 
@@ -392,9 +392,9 @@ cdef class DiaTM:
 
                   p_word_given_dialect = <double>((dialect_word_counts[d,word] + self.alpha) / ( dialect_counts[d]) + alphasum)
 
-                  p_dialect_given_document = (<double>doc_dia_counts[doc,d] + self.eta ) / dia_given_doc_denom
+                  p_dialect_given_document = (<double>doc_dia_counts[doc,d] + self.alpha ) / dia_given_doc_denom
 
-                  p_dialect_given_collection = (<double>collection_dialect_counts[col,d] + self.eta) / dia_col_collection_denom
+                  p_dialect_given_collection = (<double>collection_dialect_counts[col,d] + self.alpha) / dia_col_collection_denom
 
 
                   p_word_topic_dialect = (topic_dialect_words[k,d,word] + self.alpha) / (topic_dialect_counts[k,d] +  alphasum)
@@ -411,7 +411,7 @@ cdef class DiaTM:
                 #dist_sum_n[k] = dist_cum
 
               r = rands[n % n_rand] * dist_cum
-              new_idx = searchsorted(dist_sum, (n_topics*n_dialects)-1, r)
+              new_idx = searchsorted(dist_sum, (n_topics*n_dialects), r)
 
               #print("New idx is {}".format(new_idx))
 
