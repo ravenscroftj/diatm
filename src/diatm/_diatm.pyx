@@ -33,7 +33,7 @@ cdef extern from "gamma.h":
     cdef double lda_lgamma(double x) nogil
 
 
-cdef double lgamma(double x) nogil:
+cdef double lgamma(double x) nogil except *:
     if x <= 0:
         with gil:
             raise ValueError("x must be strictly positive")
@@ -440,60 +440,87 @@ cdef class DiaTM:
               inc(topic_dialect_words[new_topic,new_dialect,word])
               inc(topic_dialect_counts[new_topic,new_dialect])
 
-    cpdef double _loglikelihood(self):
+    cpdef double _loglikelihood(self) except *:
 
         cdef int k, d, col
         cdef int D = self.document_topic_counts.shape[0]
         cdef long[:] coffset = self.collection_offsets
 
         cdef long[:,:] ndz = self.document_topic_counts
+        cdef long[:,:] ndd = self.document_dialect_counts
         cdef long[:,:] ndw = self.dialect_word_counts
         cdef long[:,:] nzw = self.topic_word_counts
         cdef long[:,:] ncd = self.collection_dialect_counts
+        cdef long[:,:] topic_dialect_counts = self.topic_dialect_counts
+        cdef long[:,:,:] topic_dialect_words = self.topic_dialect_words
 
         cdef long[:] nz = self.topic_counts
+        cdef long[:] dz = self.dialect_counts
+        cdef int[:] dd = np.sum(ndd, axis=1).astype(np.intc)
         cdef int[:] nd = np.sum(ndz,axis=1).astype(np.intc)
         cdef int[:] nn = np.sum(ncd, axis=1).astype(np.intc)
         cdef double ll = 0
 
         # calculate log p(w|z) and p(w|dia)
         cdef double lgamma_eta, lgamma_alpha
-        with nogil:
-            lgamma_eta = lgamma(self.eta)
-            lgamma_alpha = lgamma(self.alpha)
+        #with nogil:
+        lgamma_eta = lgamma(self.eta)
+        lgamma_alpha = lgamma(self.alpha)
 
-            ll += self.n_topics * lgamma(self.eta * self.vocab_size)
-            for k in range(max(self.n_dialects,self.n_topics)):
-                ll -= lgamma(self.eta * self.vocab_size + nz[k])
-                for w in range(self.vocab_size):
+        ll += self.n_topics * lgamma(self.eta * self.vocab_size)
 
-                  if k < self.n_topics:
-                    # if nzw[k, w] == 0 addition and subtraction cancel out
-                    if nzw[k, w] > 0:
-                        ll += lgamma(self.eta + nzw[k, w]) - lgamma_eta
 
-                  if k < self.n_dialects:
-                    if ndw[k, w] > 0:
-                        ll += lgamma(self.eta + ndw[k, w]) - lgamma_eta
+        for i in range(self.n_topics * self.n_dialects):
 
-            # calculate log p(z) and p(dia|c)
-            for d in range(D):
+          d = i // self.n_topics
+          k = i % self.n_topics
 
-                col = coffset[d]
+          ll -= lgamma(self.eta * self.vocab_size + nz[k])
+          ll -= lgamma(self.eta * self.vocab_size + dz[d])
+          ll -= lgamma(self.eta * self.vocab_size + topic_dialect_counts[k,d])
 
-                ll += (lgamma(self.alpha * self.n_topics) -
-                        lgamma(self.alpha * self.n_topics + nd[d]))
+          for w in range(self.vocab_size):
 
-                ll += (lgamma(self.eta * self.n_dialects) -
-                        lgamma(self.eta * self.n_dialects + nn[col]))
+              # if nzw[k, w] == 0 addition and subtraction cancel out
+              if nzw[k, w] > 0:
+                  ll += lgamma(self.eta + nzw[k, w]) - lgamma_eta
 
-                for k in range(max(self.n_topics, self.n_dialects)):
+              if ndw[d, w] > 0:
+                  ll += lgamma(self.eta + ndw[d, w]) - lgamma_eta
 
-                    if k < self.n_topics:
-                        if ndz[d, k] > 0:
-                            ll += lgamma(self.alpha + ndz[d, k]) - lgamma_alpha
+              if topic_dialect_words[k,d,w] > 0:
+                  ll += lgamma(self.alpha + topic_dialect_words[k,d,w]) - lgamma_eta
 
-                    if k < self.n_dialects:
-                        if ncd[col, k] > 0:
-                          ll += lgamma(self.eta + ncd[col, k]) - lgamma_eta
-            return ll
+
+        # calculate log probs for p(z), p(dia|d) and p(dia|c)
+        for d in range(D):
+
+            col = coffset[d]
+
+            # p(topic|document)
+            ll += (lgamma(self.alpha * self.n_topics) -
+                    lgamma(self.alpha * self.n_topics + nd[d]))
+
+            # p(dialect|document)
+            ll += (lgamma(self.eta * self.n_dialects) -
+                    lgamma(self.eta * self.n_dialects + dd[d]))
+
+            # p(dialect|collection)
+            ll += (lgamma(self.eta * self.n_dialects) -
+                    lgamma(self.eta * self.n_dialects + nn[col]))
+
+            for k in range(max(self.n_topics, self.n_dialects)):
+
+                if k < self.n_topics:
+                    if ndz[d, k] > 0:
+                        ll += lgamma(self.alpha + ndz[d, k]) - lgamma_alpha
+
+                if k < self.n_dialects:
+
+                    if ndd[d, k] > 0:
+                        ll += lgamma(self.alpha + ndd[d, k]) - lgamma_alpha
+
+
+                    if ncd[col, k] > 0:
+                      ll += lgamma(self.eta + ncd[col, k]) - lgamma_eta
+        return ll
