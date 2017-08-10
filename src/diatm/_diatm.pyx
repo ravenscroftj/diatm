@@ -103,13 +103,14 @@ cdef class DiaTM:
     n_dialects, \
     n_collections, \
     n_iter, \
-    vocab_size
+    vocab_size, \
+    log_every
 
     cpdef public double alpha, beta, eta
 
     cpdef public object feature_names, docs
 
-    def __init__(self, n_topics, n_dialects, n_iter=50, alpha=0.1, beta=0.1, eta=0.1, feature_names=None, random_state=None):
+    def __init__(self, n_topics, n_dialects, n_iter=50, alpha=0.1, beta=0.1, eta=0.1, log_every=10, feature_names=None, random_state=None):
         self.n_topics = n_topics
         self.n_dialects = n_dialects
         self.n_iter = n_iter
@@ -117,6 +118,7 @@ cdef class DiaTM:
         self.beta = beta
         self.eta = eta
         self.feature_names = feature_names
+        self.log_every = log_every
 
         # random numbers that are reused
         rng = utils.check_random_state(random_state)
@@ -204,78 +206,27 @@ cdef class DiaTM:
             self.topic_dialect_words[topic][dia][word] += 1
 
 
-    def transform(self, X, max_iter=20, tol=1e-16):
-        """Transform the data X according to previously fitted model
+    def transform(self, X):
 
-        Parameters
-        ----------
-        X : array-like, shape (n_samples, n_features)
-            New data, where n_samples in the number of samples
-            and n_features is the number of features.
-        max_iter : int, optional
-            Maximum number of iterations in iterated-pseudocount estimation.
-        tol: double, optional
-            Tolerance value used in stopping condition.
-
-        Returns
-        -------
-        doc_topic : array-like, shape (n_samples, n_topics)
-            Point estimate of the document-topic distributions
-
-        Note
-        ----
-        This uses the "iterated pseudo-counts" approach described
-        in Wallach et al. (2009) and discussed in Buntine (2009).
-
-        """
         if isinstance(X, np.ndarray):
             # in case user passes a (non-sparse) array of shape (n_features,)
             # turn it into an array of shape (1, n_features)
             X = np.atleast_2d(X)
+
         doc_topic = np.empty((X.shape[0], self.n_topics))
         WS, DS = utils.matrix_to_lists(X)
-        # TODO: this loop is parallelizable
+
         for d in np.unique(DS):
-            doc_topic[d] = self._transform_single(WS[DS == d], max_iter, tol)
+            doc_topic[d] = self._transform_single(WS[DS == d])
         return doc_topic
 
-    def _transform_single(self, doc, max_iter, tol):
-        """Transform a single document according to the previously fit model
+    def _transform_single(self, doc):
 
-        Parameters
-        ----------
-        X : 1D numpy array of integers
-            Each element represents a word in the document
-        max_iter : int
-            Maximum number of iterations in iterated-pseudocount estimation.
-        tol: double
-            Tolerance value used in stopping condition.
+      alphasum = self.topic_dialect_words + self.alpha
+      probs = ((self.topic_dialect_words[:,:,doc.nonzero()[1]] + self.alpha) /
+                alphasum.sum(axis=2)[:,:,np.newaxis])
 
-        Returns
-        -------
-        doc_topic : 1D numpy array of length n_topics
-            Point estimate of the topic distributions for document
-
-        Note
-        ----
-
-        See Note in `transform` documentation.
-
-        """
-        PZS = np.zeros((len(doc), self.n_topics))
-        for iteration in range(max_iter + 1): # +1 is for initialization
-            PZS_new = self.components_[:, doc].T
-            PZS_new *= (PZS.sum(axis=0) - PZS + self.alpha)
-            PZS_new /= PZS_new.sum(axis=1)[:, np.newaxis] # vector to single column matrix
-            delta_naive = np.abs(PZS_new - PZS).sum()
-            logger.debug('transform iter {}, delta {}'.format(iteration, delta_naive))
-            PZS = PZS_new
-            if delta_naive < tol:
-                break
-        theta_doc = PZS.sum(axis=0) / PZS.sum()
-        assert len(theta_doc) == self.n_topics
-        assert theta_doc.shape == (self.n_topics,)
-        return theta_doc
+      return probs.sum(axis=(1,2)) / probs.sum()
 
 
     cpdef void fit(self, list X):
@@ -284,8 +235,8 @@ cdef class DiaTM:
 
         for it in range(self.n_iter):
 
-            print("Iter:", it)
-            print("LL:" +str(self._loglikelihood()))
+            if it % self.log_every == 0:
+              print("Iter: {}, LL: {}".format(it,self._loglikelihood()))
 
             self._sample()
 
