@@ -250,7 +250,14 @@ if __name__ == "__main__":
     cm1 = cv.transform(collection1)
     cm2 = cv.transform(collection2)
 
-    dtm = _diatm.DiaTM(n_topics=3, n_dialects=2, n_iter=20, feature_names=cv.get_feature_names())
+    dtm = _diatm.DiaTM(n_topics=3,
+                       n_dialects=2,
+                       n_iter=20,
+                       alpha=0.01,
+                       beta=0.1,
+                       eta=0.01,
+                       log_every=1,
+                       feature_names=cv.get_feature_names())
     #dtm = DiaTM(n_topics=3, n_dialects=2, feature_names=cv.get_feature_names())
 
 

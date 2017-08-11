@@ -223,7 +223,7 @@ cdef class DiaTM:
     def _transform_single(self, doc):
 
       alphasum = self.topic_dialect_words + self.alpha
-      probs = ((self.topic_dialect_words[:,:,doc.nonzero()[1]] + self.alpha) /
+      probs = ((self.topic_dialect_words[:,:,doc] + self.alpha) /
                 alphasum.sum(axis=2)[:,:,np.newaxis])
 
       return probs.sum(axis=(1,2)) / probs.sum()
@@ -291,6 +291,8 @@ cdef class DiaTM:
         cdef int doc
         cdef double p_topic_accum, p_dia_accum
         cdef double alphasum = self.alpha*self.vocab_size
+        cdef double betasum = self.beta*self.vocab_size
+        cdef double etasum = self.eta*self.vocab_size
 
         cdef double dia_col_collection_denom, dia_given_doc_denom, word_given_dia_denom, topic_given_doc_denom
 
@@ -320,17 +322,17 @@ cdef class DiaTM:
 
               # choose new topic based on the topic weights
 
-              dist_cum = 0
+
 
               dia_given_doc_denom = <double>(cython_sum(doc_dia_counts[doc]) + self.n_documents*self.alpha)
 
               #pre-calculate some of the values outside of the double loop
-              dia_col_collection_denom = <double>(cython_sum(collection_dialect_counts[col]) + self.n_dialects*self.alpha)
+              dia_col_collection_denom = <double>(cython_sum(collection_dialect_counts[col]) + self.n_dialects*self.eta)
 
               topic_given_doc_denom =  <double>( doc_lens[doc] +  self.alpha*self.n_topics)
 
 
-
+              dist_cum = 0
               for k in range(n_topics):
 
                 p_word_given_topic = (<double>(top_word_counts[k, word] + self.alpha) / <double>( topic_counts[k] +  alphasum))
@@ -345,10 +347,10 @@ cdef class DiaTM:
 
                   p_dialect_given_document = (<double>doc_dia_counts[doc,d] + self.alpha ) / dia_given_doc_denom
 
-                  p_dialect_given_collection = (<double>collection_dialect_counts[col,d] + self.alpha) / dia_col_collection_denom
+                  p_dialect_given_collection = (<double>collection_dialect_counts[col,d] + self.eta) / dia_col_collection_denom
 
 
-                  p_word_topic_dialect = (topic_dialect_words[k,d,word] + self.alpha) / (topic_dialect_counts[k,d] +  alphasum)
+                  p_word_topic_dialect = (topic_dialect_words[k,d,word] + self.beta) / (topic_dialect_counts[k,d] +  betasum)
 
                   dist_cum += (p_topic_accum * p_dialect_given_document
                                 * p_dialect_given_collection
@@ -358,8 +360,6 @@ cdef class DiaTM:
                   #print((k*self.n_dialects)+d )
                   dist_sum[ (k*self.n_dialects)+d ] = dist_cum
 
-                #dist_cum += p_word_given_topic * p_topic_given_document
-                #dist_sum_n[k] = dist_cum
 
               r = rands[n % n_rand] * dist_cum
               new_idx = searchsorted(dist_sum, (n_topics*n_dialects), r)
@@ -426,21 +426,21 @@ cdef class DiaTM:
           d = i // self.n_topics
           k = i % self.n_topics
 
-          ll -= lgamma(self.eta * self.vocab_size + nz[k])
+          ll -= lgamma(self.alpha * self.vocab_size + nz[k])
           ll -= lgamma(self.eta * self.vocab_size + dz[d])
-          ll -= lgamma(self.eta * self.vocab_size + topic_dialect_counts[k,d])
+          ll -= lgamma(self.beta * self.vocab_size + topic_dialect_counts[k,d])
 
           for w in range(self.vocab_size):
 
               # if nzw[k, w] == 0 addition and subtraction cancel out
               if nzw[k, w] > 0:
-                  ll += lgamma(self.eta + nzw[k, w]) - lgamma_eta
+                  ll += lgamma(self.alpha + nzw[k, w]) - lgamma_eta
 
               if ndw[d, w] > 0:
                   ll += lgamma(self.eta + ndw[d, w]) - lgamma_eta
 
               if topic_dialect_words[k,d,w] > 0:
-                  ll += lgamma(self.alpha + topic_dialect_words[k,d,w]) - lgamma_eta
+                  ll += lgamma(self.beta + topic_dialect_words[k,d,w]) - lgamma_eta
 
 
         # calculate log probs for p(z), p(dia|d) and p(dia|c)
