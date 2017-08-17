@@ -33,7 +33,7 @@ cdef extern from "gamma.h":
     cdef double lda_lgamma(double x) nogil
 
 
-cdef double lgamma(double x) nogil:
+cdef double lgamma(double x) nogil except *:
     if x <= 0:
         with gil:
             raise ValueError("x must be strictly positive")
@@ -103,13 +103,14 @@ cdef class DiaTM:
     n_dialects, \
     n_collections, \
     n_iter, \
-    vocab_size
+    vocab_size, \
+    log_every
 
     cpdef public double alpha, beta, eta
 
     cpdef public object feature_names, docs
 
-    def __init__(self, n_topics, n_dialects, n_iter=50, alpha=0.1, beta=0.1, eta=0.1, feature_names=None, random_state=None):
+    def __init__(self, n_topics, n_dialects, n_iter=50, alpha=0.1, beta=0.1, eta=0.1, log_every=10, feature_names=None, random_state=None):
         self.n_topics = n_topics
         self.n_dialects = n_dialects
         self.n_iter = n_iter
@@ -117,6 +118,7 @@ cdef class DiaTM:
         self.beta = beta
         self.eta = eta
         self.feature_names = feature_names
+        self.log_every = log_every
 
         # random numbers that are reused
         rng = utils.check_random_state(random_state)
@@ -204,78 +206,27 @@ cdef class DiaTM:
             self.topic_dialect_words[topic][dia][word] += 1
 
 
-    def transform(self, X, max_iter=20, tol=1e-16):
-        """Transform the data X according to previously fitted model
+    def transform(self, X):
 
-        Parameters
-        ----------
-        X : array-like, shape (n_samples, n_features)
-            New data, where n_samples in the number of samples
-            and n_features is the number of features.
-        max_iter : int, optional
-            Maximum number of iterations in iterated-pseudocount estimation.
-        tol: double, optional
-            Tolerance value used in stopping condition.
-
-        Returns
-        -------
-        doc_topic : array-like, shape (n_samples, n_topics)
-            Point estimate of the document-topic distributions
-
-        Note
-        ----
-        This uses the "iterated pseudo-counts" approach described
-        in Wallach et al. (2009) and discussed in Buntine (2009).
-
-        """
         if isinstance(X, np.ndarray):
             # in case user passes a (non-sparse) array of shape (n_features,)
             # turn it into an array of shape (1, n_features)
             X = np.atleast_2d(X)
+
         doc_topic = np.empty((X.shape[0], self.n_topics))
         WS, DS = utils.matrix_to_lists(X)
-        # TODO: this loop is parallelizable
+
         for d in np.unique(DS):
-            doc_topic[d] = self._transform_single(WS[DS == d], max_iter, tol)
+            doc_topic[d] = self._transform_single(WS[DS == d])
         return doc_topic
 
-    def _transform_single(self, doc, max_iter, tol):
-        """Transform a single document according to the previously fit model
+    def _transform_single(self, doc):
 
-        Parameters
-        ----------
-        X : 1D numpy array of integers
-            Each element represents a word in the document
-        max_iter : int
-            Maximum number of iterations in iterated-pseudocount estimation.
-        tol: double
-            Tolerance value used in stopping condition.
+      alphasum = self.topic_dialect_words + self.alpha
+      probs = ((self.topic_dialect_words[:,:,doc] + self.alpha) /
+                alphasum.sum(axis=2)[:,:,np.newaxis])
 
-        Returns
-        -------
-        doc_topic : 1D numpy array of length n_topics
-            Point estimate of the topic distributions for document
-
-        Note
-        ----
-
-        See Note in `transform` documentation.
-
-        """
-        PZS = np.zeros((len(doc), self.n_topics))
-        for iteration in range(max_iter + 1): # +1 is for initialization
-            PZS_new = self.components_[:, doc].T
-            PZS_new *= (PZS.sum(axis=0) - PZS + self.alpha)
-            PZS_new /= PZS_new.sum(axis=1)[:, np.newaxis] # vector to single column matrix
-            delta_naive = np.abs(PZS_new - PZS).sum()
-            logger.debug('transform iter {}, delta {}'.format(iteration, delta_naive))
-            PZS = PZS_new
-            if delta_naive < tol:
-                break
-        theta_doc = PZS.sum(axis=0) / PZS.sum()
-        assert len(theta_doc) == self.n_topics
-        assert theta_doc.shape == (self.n_topics,)
-        return theta_doc
+      return probs.sum(axis=(1,2)) / probs.sum()
 
 
     cpdef void fit(self, list X):
@@ -284,8 +235,8 @@ cdef class DiaTM:
 
         for it in range(self.n_iter):
 
-            print("Iter:", it)
-            print("LL:" +str(self._loglikelihood()))
+            if it % self.log_every == 0:
+              print("Iter: {}, LL: {}".format(it,self._loglikelihood()))
 
             self._sample()
 
@@ -340,6 +291,8 @@ cdef class DiaTM:
         cdef int doc
         cdef double p_topic_accum, p_dia_accum
         cdef double alphasum = self.alpha*self.vocab_size
+        cdef double betasum = self.beta*self.vocab_size
+        cdef double etasum = self.eta*self.vocab_size
 
         cdef double dia_col_collection_denom, dia_given_doc_denom, word_given_dia_denom, topic_given_doc_denom
 
@@ -369,17 +322,17 @@ cdef class DiaTM:
 
               # choose new topic based on the topic weights
 
-              dist_cum = 0
+
 
               dia_given_doc_denom = <double>(cython_sum(doc_dia_counts[doc]) + self.n_documents*self.alpha)
 
               #pre-calculate some of the values outside of the double loop
-              dia_col_collection_denom = <double>(cython_sum(collection_dialect_counts[col]) + self.n_dialects*self.alpha)
+              dia_col_collection_denom = <double>(cython_sum(collection_dialect_counts[col]) + self.n_dialects*self.eta)
 
               topic_given_doc_denom =  <double>( doc_lens[doc] +  self.alpha*self.n_topics)
 
 
-
+              dist_cum = 0
               for k in range(n_topics):
 
                 p_word_given_topic = (<double>(top_word_counts[k, word] + self.alpha) / <double>( topic_counts[k] +  alphasum))
@@ -394,10 +347,10 @@ cdef class DiaTM:
 
                   p_dialect_given_document = (<double>doc_dia_counts[doc,d] + self.alpha ) / dia_given_doc_denom
 
-                  p_dialect_given_collection = (<double>collection_dialect_counts[col,d] + self.alpha) / dia_col_collection_denom
+                  p_dialect_given_collection = (<double>collection_dialect_counts[col,d] + self.eta) / dia_col_collection_denom
 
 
-                  p_word_topic_dialect = (topic_dialect_words[k,d,word] + self.alpha) / (topic_dialect_counts[k,d] +  alphasum)
+                  p_word_topic_dialect = (topic_dialect_words[k,d,word] + self.beta) / (topic_dialect_counts[k,d] +  betasum)
 
                   dist_cum += (p_topic_accum * p_dialect_given_document
                                 * p_dialect_given_collection
@@ -407,8 +360,6 @@ cdef class DiaTM:
                   #print((k*self.n_dialects)+d )
                   dist_sum[ (k*self.n_dialects)+d ] = dist_cum
 
-                #dist_cum += p_word_given_topic * p_topic_given_document
-                #dist_sum_n[k] = dist_cum
 
               r = rands[n % n_rand] * dist_cum
               new_idx = searchsorted(dist_sum, (n_topics*n_dialects), r)
@@ -440,60 +391,87 @@ cdef class DiaTM:
               inc(topic_dialect_words[new_topic,new_dialect,word])
               inc(topic_dialect_counts[new_topic,new_dialect])
 
-    cpdef double _loglikelihood(self):
+    cpdef double _loglikelihood(self) except *:
 
         cdef int k, d, col
         cdef int D = self.document_topic_counts.shape[0]
         cdef long[:] coffset = self.collection_offsets
 
         cdef long[:,:] ndz = self.document_topic_counts
+        cdef long[:,:] ndd = self.document_dialect_counts
         cdef long[:,:] ndw = self.dialect_word_counts
         cdef long[:,:] nzw = self.topic_word_counts
         cdef long[:,:] ncd = self.collection_dialect_counts
+        cdef long[:,:] topic_dialect_counts = self.topic_dialect_counts
+        cdef long[:,:,:] topic_dialect_words = self.topic_dialect_words
 
         cdef long[:] nz = self.topic_counts
+        cdef long[:] dz = self.dialect_counts
+        cdef int[:] dd = np.sum(ndd, axis=1).astype(np.intc)
         cdef int[:] nd = np.sum(ndz,axis=1).astype(np.intc)
         cdef int[:] nn = np.sum(ncd, axis=1).astype(np.intc)
         cdef double ll = 0
 
         # calculate log p(w|z) and p(w|dia)
         cdef double lgamma_eta, lgamma_alpha
-        with nogil:
-            lgamma_eta = lgamma(self.eta)
-            lgamma_alpha = lgamma(self.alpha)
+        #with nogil:
+        lgamma_eta = lgamma(self.eta)
+        lgamma_alpha = lgamma(self.alpha)
 
-            ll += self.n_topics * lgamma(self.eta * self.vocab_size)
-            for k in range(max(self.n_dialects,self.n_topics)):
-                ll -= lgamma(self.eta * self.vocab_size + nz[k])
-                for w in range(self.vocab_size):
+        ll += self.n_topics * lgamma(self.eta * self.vocab_size)
 
-                  if k < self.n_topics:
-                    # if nzw[k, w] == 0 addition and subtraction cancel out
-                    if nzw[k, w] > 0:
-                        ll += lgamma(self.eta + nzw[k, w]) - lgamma_eta
 
-                  if k < self.n_dialects:
-                    if ndw[k, w] > 0:
-                        ll += lgamma(self.eta + ndw[k, w]) - lgamma_eta
+        for i in range(self.n_topics * self.n_dialects):
 
-            # calculate log p(z) and p(dia|c)
-            for d in range(D):
+          d = i // self.n_topics
+          k = i % self.n_topics
 
-                col = coffset[d]
+          ll -= lgamma(self.alpha * self.vocab_size + nz[k])
+          ll -= lgamma(self.eta * self.vocab_size + dz[d])
+          ll -= lgamma(self.beta * self.vocab_size + topic_dialect_counts[k,d])
 
-                ll += (lgamma(self.alpha * self.n_topics) -
-                        lgamma(self.alpha * self.n_topics + nd[d]))
+          for w in range(self.vocab_size):
 
-                ll += (lgamma(self.eta * self.n_dialects) -
-                        lgamma(self.eta * self.n_dialects + nn[col]))
+              # if nzw[k, w] == 0 addition and subtraction cancel out
+              if nzw[k, w] > 0:
+                  ll += lgamma(self.alpha + nzw[k, w]) - lgamma_eta
 
-                for k in range(max(self.n_topics, self.n_dialects)):
+              if ndw[d, w] > 0:
+                  ll += lgamma(self.eta + ndw[d, w]) - lgamma_eta
 
-                    if k < self.n_topics:
-                        if ndz[d, k] > 0:
-                            ll += lgamma(self.alpha + ndz[d, k]) - lgamma_alpha
+              if topic_dialect_words[k,d,w] > 0:
+                  ll += lgamma(self.beta + topic_dialect_words[k,d,w]) - lgamma_eta
 
-                    if k < self.n_dialects:
-                        if ncd[col, k] > 0:
-                          ll += lgamma(self.eta + ncd[col, k]) - lgamma_eta
-            return ll
+
+        # calculate log probs for p(z), p(dia|d) and p(dia|c)
+        for d in range(D):
+
+            col = coffset[d]
+
+            # p(topic|document)
+            ll += (lgamma(self.alpha * self.n_topics) -
+                    lgamma(self.alpha * self.n_topics + nd[d]))
+
+            # p(dialect|document)
+            ll += (lgamma(self.eta * self.n_dialects) -
+                    lgamma(self.eta * self.n_dialects + dd[d]))
+
+            # p(dialect|collection)
+            ll += (lgamma(self.eta * self.n_dialects) -
+                    lgamma(self.eta * self.n_dialects + nn[col]))
+
+            for k in range(max(self.n_topics, self.n_dialects)):
+
+                if k < self.n_topics:
+                    if ndz[d, k] > 0:
+                        ll += lgamma(self.alpha + ndz[d, k]) - lgamma_alpha
+
+                if k < self.n_dialects:
+
+                    if ndd[d, k] > 0:
+                        ll += lgamma(self.alpha + ndd[d, k]) - lgamma_alpha
+
+
+                    if ncd[col, k] > 0:
+                      ll += lgamma(self.eta + ncd[col, k]) - lgamma_eta
+        return ll
